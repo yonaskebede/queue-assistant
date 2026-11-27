@@ -56,7 +56,7 @@ button:disabled { opacity: .4; }
 <p id="connection">Not connected</p>
 
 <textarea id="songs"
-placeholder="Paste songs here, one per line:
+placeholder="Paste song titles and artists or Spotify track links, one per line:
 La Femme d'Argent — Air
 In the Waiting Line — Zero 7
 Loud Places — Jamie xx"></textarea>
@@ -235,25 +235,67 @@ const normalize = s => s.toLowerCase()
   .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
   .replace(/[^a-z0-9]/g, "");
 
+function directTrack(line) {
+  const match = line.match(/^(?:https:\/\/open\.spotify\.com\/(?:intl-[a-z-]+\/)?track\/|spotify:track:)([A-Za-z0-9]{22})(?:[?#][^\s]*)?$/i);
+  return match ? {uri: "spotify:track:" + match[1], name: "Spotify track " + match[1], artists: []} : null;
+}
+
+const words = s => s.toLowerCase().normalize("NFD")
+  .replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
+
+function baseTitle(s) {
+  return s.replace(/\s*\([^)]*\)\s*$/, "").replace(/\s*\[[^\]]*\]\s*$/, "")
+    .replace(/\s+-\s+.*$/, "").trim();
+}
+
+function scoreTrack(track, title, artist) {
+  const a = words(artist);
+  const artistMatch = track.artists.some(x => {
+    const b = words(x.name);
+    return b && (a === b || (" " + a + " ").includes(" " + b + " "));
+  });
+  if (!artistMatch) return 0;
+  const t = normalize(title), n = normalize(track.name);
+  if (!t || !n) return 0;
+  if (t === n) return 100;
+  if (t === normalize(baseTitle(track.name)) && !/\b(remix|live|acoustic|edit|instrumental|demo|cover|sped up|slowed)\b/i.test(track.name.slice(baseTitle(track.name).length))) return 90;
+  if (normalize(baseTitle(title)) === normalize(baseTitle(track.name))) return 75;
+  const tokens = words(title).split(" ");
+  const other = words(track.name).split(" ");
+  return tokens.some(x => x.length > 2 && other.includes(x)) ? 50 : 20;
+}
+
 async function findTrack(line) {
+  const direct = directTrack(line);
+  if (direct) return direct;
   const parts = line.split(/\s+[—–-]\s+/);
-  const title = parts[0].trim();
-  const artist = parts.slice(1).join(" ").trim();
+  const artist = parts.pop().trim();
+  const title = parts.join(" - ").trim();
+  if (!title || !artist) return null;
 
-  if (!artist) return null;
-
-  const query = `track:${title} artist:${artist}`;
-  const data = await api(
-    "search?type=track&limit=10&q=" +
-    encodeURIComponent(query)
-  );
-
-  return data.tracks?.items?.find(track =>
-    normalize(track.name) === normalize(title) &&
-    track.artists.some(a =>
-      normalize(artist).includes(normalize(a.name))
-    )
-  ) || null;
+  const candidates = new Map();
+  const search = async q => {
+    const data = await api("search?type=track&limit=10&q=" + encodeURIComponent(q));
+    for (const track of data.tracks?.items || []) {
+      if (track?.uri && track.artists && track.is_playable !== false) candidates.set(track.uri, track);
+    }
+  };
+  const ranked = () => [...candidates.values()].map(track => ({track, score: scoreTrack(track, title, artist)}))
+    .filter(x => x.score > 0).sort((a,b) => b.score - a.score);
+  await search("track:" + title + " artist:" + artist);
+  let results = ranked();
+  if (results[0]?.score !== 100) {
+    await search(title + " " + artist);
+    results = ranked();
+  }
+  if (results[0]?.score === 100) return results[0].track;
+  if (results[0]?.score === 90 && results.filter(x => x.score === 90).every(x => normalize(x.track.name) === normalize(results[0].track.name))) return results[0].track;
+  if (!results.length) return null;
+  const choices = results.slice(0, 5);
+  const answer = window.prompt("Choose a match for " + line + " (Cancel to skip):\n" +
+    choices.map((x,i) => (i+1) + ". " + x.track.name + " — " + x.track.artists.map(a => a.name).join(", ")).join("\n"));
+  if (answer === null || !/^[1-5]$/.test(answer.trim())) return null;
+  return choices[Number(answer)-1]?.track || null;
 }
 
 async function addQueue() {
@@ -300,7 +342,7 @@ async function addQueue() {
         added++;
 
         log("✓ " + track.name + " — " +
-          track.artists.map(a => a.name).join(", "));
+          (track.artists.length ? track.artists.map(a => a.name).join(", ") : "direct link"));
 
         await new Promise(r => setTimeout(r, 350));
 
