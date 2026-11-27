@@ -56,6 +56,15 @@ button:disabled { opacity: .4; }
 #options span { min-width: 0; overflow-wrap: anywhere; }
 #options small { display: block; color: #ccc; margin-top: 4px; }
 #picker-actions { position: sticky; bottom: -18px; background: #242424; padding: 8px 0 18px; }
+[hidden] { display: none !important; }
+.project-card { border: 1px solid #555; border-radius: 14px; padding: 16px; margin: 12px 0; }
+.project-card h2, .project-card h3 { margin: 0 0 8px; }
+#project-form label { display: block; margin-top: 14px; }
+#project-form input, #project-form select { width: 100%; padding: 12px; margin-top: 6px; background: #242424; color: white; border: 1px solid #666; border-radius: 8px; font: inherit; }
+#project-form textarea { min-height: 100px; margin-top: 6px; }
+#project-history details { padding: 12px 0; border-bottom: 1px solid #444; }
+#project-history li { overflow-wrap: anywhere; margin: 6px 0; }
+a { color: #1DB954; }
 </style>
 </head>
 <body>
@@ -66,6 +75,26 @@ button:disabled { opacity: .4; }
 <button id="login">Connect Spotify</button>
 <p id="connection">Not connected</p>
 
+<p id="project-notice" role="status"></p>
+<section id="home">
+  <div class="project-card"><h2>Expand a playlist</h2><p>Build on music you already love.</p><button id="expand">Start playlist project</button></div>
+  <div class="project-card"><h2>Discover a mood</h2><p>Turn a feeling into a music collection.</p><button id="mood">Start mood project</button></div>
+  <h2>Continue discovering</h2>
+  <div id="project-list"></div>
+  <button id="standalone" class="secondary">Quick queue without a project</button>
+</section>
+<form id="project-form" hidden>
+  <h2 id="form-title"></h2>
+  <label>Project name<input id="project-name" required maxlength="120"></label>
+  <label>Musical direction<textarea id="project-direction" required maxlength="4000" placeholder="Describe the mood, styles or example songs"></textarea></label>
+  <label>Spotify playlist link (optional)<input id="project-link" type="url" placeholder="https://open.spotify.com/playlist/…"></label>
+  <button type="submit">Save project</button>
+  <button type="button" id="form-back" class="secondary">Cancel</button>
+</form>
+<section id="workspace" hidden>
+<button id="home-back" class="secondary">← All projects</button>
+<div id="project-context"></div>
+<div id="project-history"></div>
 <textarea id="songs"
 placeholder="Paste song titles and artists or Spotify track links, one per line:
 La Femme d'Argent — Air
@@ -77,6 +106,7 @@ Loud Places — Jamie xx"></textarea>
 
 <p id="status" aria-live="polite"></p>
 <section id="batch-result" hidden></section>
+</section>
 <dialog id="picker" aria-labelledby="picker-title" aria-describedby="picker-query">
   <h2 id="picker-title">Choose your track</h2>
   <p id="picker-query"></p>
@@ -208,6 +238,7 @@ async function api(path, method = "GET") {
 }
 
 function connected() {
+  spotifyConnected = true;
   $("connection").textContent = "Connected to Spotify";
   $("queue").disabled = batchActive;
   $("login").textContent = "Reconnect Spotify";
@@ -371,6 +402,7 @@ function trackLabel(track) {
   return track.name + (track.artists.length ? " — " + track.artists.map(a => a.name).join(", ") : "");
 }
 let batchActive = false;
+let spotifyConnected = false;
 function showPanel(title, detail, entries) {
   const panel = $("batch-result");
   panel.replaceChildren();
@@ -409,8 +441,11 @@ function resetBatch(lines = []) {
   $("songs").hidden = false;
   $("queue").hidden = false;
   $("clear").hidden = false;
-  $("queue").disabled = false;
+  $("queue").disabled = !spotifyConnected;
   $("login").disabled = false;
+  $("home-back").disabled = false;
+  $("project-context").hidden = false;
+  $("project-history").hidden = false;
   $("status").textContent = "";
   batchActive = false;
 }
@@ -419,6 +454,10 @@ async function addQueue() {
   const lines = [...new Set($("songs").value.split("\n").map(s => s.trim()).filter(Boolean))];
   if (!lines.length) { log("Paste your song list first."); return; }
   batchActive = true;
+  const sessionProject = activeProject;
+  $("home-back").disabled = true;
+  $("project-context").hidden = true;
+  $("project-history").hidden = true;
   $("queue").disabled = true;
   $("login").disabled = true;
   $("songs").hidden = true;
@@ -473,9 +512,11 @@ async function addQueue() {
   const count = state => rows.filter(r => r.state === state).length;
   const added = count("added");
   const panel = showPanel(added === rows.length ? "Queue complete!" : "Batch finished", added + " added · " + count("skipped") + " skipped · " + count("not found") + " not found · " + count("failed") + " failed · " + count("duplicate") + " duplicates omitted", rows.map(r => r.state + ": " + (r.track ? trackLabel(r.track) : r.line) + (r.error ? " (" + r.error + ")" : "")));
+  recordSession(sessionProject, rows);
   const retry = rows.filter(r => ["failed","not found"].includes(r.state)).map(r => r.line);
   if (retry.length) panelButton(panel, "Review unsuccessful songs", () => resetBatch(retry), true);
   panelButton(panel, "Start a new batch", () => resetBatch());
+  panelButton(panel, "Back to projects", () => { resetBatch(); showHome(); }, true);
 }
 
 $("login").onclick = () => authorize().catch(e => log(e.message));
@@ -485,6 +526,96 @@ $("clear").onclick = () => {
   $("status").textContent = "";
 };
 
+
+const projectKey = "queue-assistant.projects.v1";
+let projects = [], activeProject = null, formKind = "mood", editing = false, storageOK = true;
+function notice(message) { $("project-notice").textContent = message; }
+try {
+  const saved = JSON.parse(localStorage.getItem(projectKey) || "[]");
+  if (!Array.isArray(saved)) throw new Error("Invalid project data");
+  projects = saved;
+} catch (e) { storageOK = false; notice("Saved projects could not be read. Quick queue is still available."); }
+function persist(next) {
+  if (!storageOK) { notice("Project storage unavailable."); return false; }
+  try { localStorage.setItem(projectKey, JSON.stringify(next)); projects = next; return true; }
+  catch (e) { notice("Could not save project data. Browser storage may be full or unavailable."); return false; }
+}
+function element(tag, value, parent) {
+  const node = document.createElement(tag); node.textContent = value; parent.append(node); return node;
+}
+function showHome() {
+  if (batchActive) return;
+  activeProject = null;
+  $("workspace").hidden = true; $("project-form").hidden = true; $("home").hidden = false;
+  const list = $("project-list"); list.replaceChildren();
+  if (!projects.length) element("p","No projects yet.",list);
+  for (const p of projects) {
+    const card = document.createElement("div"); card.className = "project-card"; list.append(card);
+    element("h3",p.name,card);
+    element("p",p.direction,card);
+    element("p",(p.kind === "playlist" ? "Playlist project" : "Mood project") + " · " + p.sessions.length + " sessions",card);
+    panelButton(card,"Open project",()=>openProject(p.id));
+  }
+}
+function openForm(kind, edit = false) {
+  if (!storageOK) { notice("Project storage unavailable."); return; }
+  formKind = kind; editing = edit;
+  const p = edit ? projects.find(x=>x.id===activeProject) : null;
+  $("home").hidden = true; $("workspace").hidden = true; $("project-form").hidden = false;
+  $("form-title").textContent = edit ? "Edit project" : kind === "playlist" ? "Expand a playlist" : "Discover a mood";
+  $("project-name").value = p?.name || "";
+  $("project-direction").value = p?.direction || "";
+  $("project-link").value = p?.link || "";
+}
+function renderProject() {
+  const context = $("project-context"), history = $("project-history");
+  context.replaceChildren(); history.replaceChildren();
+  const p = projects.find(x=>x.id===activeProject);
+  if (!p) { element("h2","Quick queue",context); return; }
+  element("h2",p.name,context); element("p",p.direction,context);
+  if (p.link) { const a = element("a","Open Spotify playlist",context); a.href = p.link; a.target = "_blank"; a.rel = "noopener noreferrer"; }
+  panelButton(context,"Edit project",()=>openForm(p.kind,true),true);
+  element("h3","Discovery history",history);
+  if (!p.sessions.length) element("p","Paste recommendations below to record your first session.",history);
+  for (const session of [...p.sessions].reverse()) {
+    const details = document.createElement("details"); history.append(details);
+    element("summary",new Date(session.date).toLocaleString()+" · "+session.rows.length+" recommendations",details);
+    const ul = document.createElement("ul"); details.append(ul);
+    for (const row of session.rows) element("li",row.line+" — "+row.state,ul);
+  }
+  if (p.sessions.length) panelButton(history,"Copy previous recommendations",async()=>{
+    try { await navigator.clipboard.writeText([...new Set(p.sessions.flatMap(s=>s.rows.map(r=>r.line)))].join("\n")); notice("Previous recommendations copied."); }
+    catch { notice("Clipboard unavailable. You can select and copy the history manually."); }
+  },true);
+}
+function openProject(id) {
+  if (batchActive) return;
+  activeProject = id; $("home").hidden = true; $("project-form").hidden = true; $("workspace").hidden = false;
+  renderProject();
+}
+function recordSession(id, rows) {
+  if (!id) return;
+  const session = {date:new Date().toISOString(),rows:rows.map(r=>({line:r.line,state:r.state}))};
+  const next = projects.map(p=>p.id===id ? {...p,sessions:[...p.sessions,session]} : p);
+  if (persist(next)) renderProject();
+  else notice("Queue results are shown below, but this session could not be saved.");
+}
+$("expand").onclick = ()=>openForm("playlist");
+$("mood").onclick = ()=>openForm("mood");
+$("standalone").onclick = ()=>openProject(null);
+$("home-back").onclick = ()=>{ if (!batchActive) { resetBatch(); showHome(); } };
+$("form-back").onclick = ()=>editing ? openProject(activeProject) : showHome();
+$("project-form").onsubmit = e=>{
+  e.preventDefault();
+  const name = $("project-name").value.trim(), direction = $("project-direction").value.trim(), link = $("project-link").value.trim();
+  if (!name || !direction) { notice("Enter a project name and musical direction."); return; }
+  if (link && !/^https:\/\/open\.spotify\.com\/(?:intl-[a-z-]+\/)?playlist\/[A-Za-z0-9]{22}(?:[?#][^\s]*)?$/i.test(link)) { notice("Use a Spotify playlist link, or leave it blank."); return; }
+  const id = editing ? activeProject : crypto.randomUUID();
+  const next = editing ? projects.map(p=>p.id===id ? {...p,name,direction,link} : p) : [...projects,{id,name,direction,link,kind:formKind,sessions:[]}];
+  if (persist(next)) { notice("Project saved."); openProject(id); }
+};
+
+showHome();
 initialize();
 </script>
 </body>
