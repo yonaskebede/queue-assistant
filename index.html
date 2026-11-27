@@ -179,8 +179,11 @@ async function api(path, method = "GET") {
     );
   }
 
-  return response.status === 204
-    ? null : response.json();
+  if (method === "POST" || response.status === 204) {
+    return null;
+  }
+
+  return response.json();
 }
 
 function connected() {
