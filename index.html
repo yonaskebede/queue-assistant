@@ -45,6 +45,17 @@ button:disabled { opacity: .4; }
   line-height: 1.6;
   font-size: 14px;
 }
+#picker { width: min(94vw, 560px); max-height: 90dvh; padding: 18px; border: 1px solid #555; border-radius: 18px; background: #242424; color: white; overflow: auto; }
+#picker::backdrop { background: #000b; }
+#picker h2 { margin: 0; font-size: 22px; }
+#options { display: grid; gap: 10px; }
+#options label { display: flex; align-items: center; gap: 12px; padding: 12px; border: 2px solid #555; border-radius: 12px; cursor: pointer; min-height: 64px; }
+#options label:has(input:checked) { border-color: #1DB954; background: #193526; }
+#options input { accent-color: #1DB954; flex-shrink: 0; width: 20px; height: 20px; }
+#options img { width: 52px; height: 52px; object-fit: cover; border-radius: 5px; }
+#options span { min-width: 0; overflow-wrap: anywhere; }
+#options small { display: block; color: #ccc; margin-top: 4px; }
+#picker-actions { position: sticky; bottom: -18px; background: #242424; padding: 8px 0 18px; }
 </style>
 </head>
 <body>
@@ -64,7 +75,16 @@ Loud Places — Jamie xx"></textarea>
 <button id="queue" disabled>Add all to Spotify queue</button>
 <button id="clear" class="secondary">Clear list</button>
 
-<p id="status"></p>
+<p id="status" aria-live="polite"></p>
+<dialog id="picker" aria-labelledby="picker-title" aria-describedby="picker-query">
+  <h2 id="picker-title">Choose your track</h2>
+  <p id="picker-query"></p>
+  <div id="options" role="radiogroup" aria-label="Potential tracks"></div>
+  <div id="picker-actions">
+    <button id="pick-add" disabled>Add selected track to queue</button>
+    <button id="pick-skip" class="secondary">Skip this song</button>
+  </div>
+</dialog>
 
 <script>
 const clientId = "83ce16cb4f4449acb0fdcd3b78c1c294";
@@ -265,6 +285,58 @@ function scoreTrack(track, title, artist) {
   return tokens.some(x => x.length > 2 && other.includes(x)) ? 50 : 20;
 }
 
+function chooseTrack(line, tracks) {
+  return new Promise(resolve => {
+    const dialog = $("picker"), options = $("options"), add = $("pick-add"), skip = $("pick-skip");
+    let selected = null;
+    $("picker-query").textContent = line;
+    options.replaceChildren();
+    add.disabled = true;
+    for (const track of tracks) {
+      const label = document.createElement("label");
+      const radio = document.createElement("input");
+      radio.type = "radio";
+      radio.name = "track-choice";
+      radio.addEventListener("change", () => {
+        selected = track;
+        add.disabled = false;
+      });
+      label.append(radio);
+      const artwork = track.album?.images?.[0]?.url;
+      if (artwork && artwork.startsWith("https://")) {
+        const img = document.createElement("img");
+        img.src = artwork;
+        img.alt = "";
+        img.addEventListener("error", () => img.remove());
+        label.append(img);
+      }
+      const info = document.createElement("span");
+      const title = document.createElement("strong");
+      title.textContent = track.name;
+      const artists = document.createElement("small");
+      artists.textContent = track.artists.map(a => a.name).join(", ");
+      info.append(title, artists);
+      if (track.album?.name) {
+        const album = document.createElement("small");
+        album.textContent = track.album.name + (track.album.release_date ? " · " + track.album.release_date.slice(0,4) : "");
+        info.append(album);
+      }
+      label.append(info);
+      options.append(label);
+    }
+    let choice = null;
+    add.onclick = () => { if (selected) { choice = selected; dialog.close(); } };
+    skip.onclick = () => dialog.close();
+    dialog.addEventListener("close", () => {
+      add.onclick = null;
+      skip.onclick = null;
+      options.replaceChildren();
+      resolve(choice);
+    }, {once: true});
+    dialog.showModal();
+  });
+}
+
 async function findTrack(line) {
   const direct = directTrack(line);
   if (direct) return direct;
@@ -291,11 +363,7 @@ async function findTrack(line) {
   if (results[0]?.score === 100) return results[0].track;
   if (results[0]?.score === 90 && results.filter(x => x.score === 90).every(x => normalize(x.track.name) === normalize(results[0].track.name))) return results[0].track;
   if (!results.length) return null;
-  const choices = results.slice(0, 5);
-  const answer = window.prompt("Choose a match for " + line + " (Cancel to skip):\n" +
-    choices.map((x,i) => (i+1) + ". " + x.track.name + " — " + x.track.artists.map(a => a.name).join(", ")).join("\n"));
-  if (answer === null || !/^[1-5]$/.test(answer.trim())) return null;
-  return choices[Number(answer)-1]?.track || null;
+  return chooseTrack(line, results.slice(0, 5).map(x => x.track));
 }
 
 async function addQueue() {
