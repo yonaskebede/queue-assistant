@@ -76,12 +76,13 @@ Loud Places — Jamie xx"></textarea>
 <button id="clear" class="secondary">Clear list</button>
 
 <p id="status" aria-live="polite"></p>
+<section id="batch-result" hidden></section>
 <dialog id="picker" aria-labelledby="picker-title" aria-describedby="picker-query">
   <h2 id="picker-title">Choose your track</h2>
   <p id="picker-query"></p>
   <div id="options" role="radiogroup" aria-label="Potential tracks"></div>
   <div id="picker-actions">
-    <button id="pick-add" disabled>Add selected track to queue</button>
+    <button id="pick-add" disabled>Confirm &amp; continue</button>
     <button id="pick-skip" class="secondary">Skip this song</button>
   </div>
 </dialog>
@@ -208,7 +209,7 @@ async function api(path, method = "GET") {
 
 function connected() {
   $("connection").textContent = "Connected to Spotify";
-  $("queue").disabled = false;
+  $("queue").disabled = batchActive;
   $("login").textContent = "Reconnect Spotify";
 }
 
@@ -285,11 +286,11 @@ function scoreTrack(track, title, artist) {
   return tokens.some(x => x.length > 2 && other.includes(x)) ? 50 : 20;
 }
 
-function chooseTrack(line, tracks) {
+function chooseTrack(line, tracks, progress) {
   return new Promise(resolve => {
     const dialog = $("picker"), options = $("options"), add = $("pick-add"), skip = $("pick-skip");
     let selected = null;
-    $("picker-query").textContent = line;
+    $("picker-query").textContent = progress + " · " + line;
     options.replaceChildren();
     add.disabled = true;
     for (const track of tracks) {
@@ -363,67 +364,118 @@ async function findTrack(line) {
   if (results[0]?.score === 100) return results[0].track;
   if (results[0]?.score === 90 && results.filter(x => x.score === 90).every(x => normalize(x.track.name) === normalize(results[0].track.name))) return results[0].track;
   if (!results.length) return null;
-  return chooseTrack(line, results.slice(0, 5).map(x => x.track));
+  return {choices: results.slice(0, 5).map(x => x.track)};
 }
 
-async function addQueue() {
-  const lines = [...new Set(
-    $("songs").value.split("\n")
-      .map(s => s.trim()).filter(Boolean)
-  )];
-
-  if (!lines.length) {
-    log("Paste your song list first.");
-    return;
+function trackLabel(track) {
+  return track.name + (track.artists.length ? " — " + track.artists.map(a => a.name).join(", ") : "");
+}
+let batchActive = false;
+function showPanel(title, detail, entries) {
+  const panel = $("batch-result");
+  panel.replaceChildren();
+  panel.hidden = false;
+  const heading = document.createElement("h2");
+  heading.textContent = title;
+  const summary = document.createElement("p");
+  summary.textContent = detail;
+  panel.append(heading, summary);
+  for (const entry of entries) {
+    const p = document.createElement("p");
+    p.textContent = entry;
+    panel.append(p);
   }
-
-  $("queue").disabled = true;
+  return panel;
+}
+function panelButton(panel, label, action, secondary = false) {
+  const button = document.createElement("button");
+  button.textContent = label;
+  if (secondary) button.className = "secondary";
+  button.onclick = action;
+  panel.append(button);
+}
+function confirmBatch(rows) {
+  return new Promise(resolve => {
+    const panel = showPanel("Ready to queue", rows.length + " songs selected", rows.map(r => trackLabel(r.track)));
+    const finish = value => { panel.replaceChildren(); panel.hidden = true; resolve(value); };
+    panelButton(panel, "Add " + rows.length + " songs to Spotify", () => finish(true));
+    panelButton(panel, "Cancel batch", () => finish(false), true);
+  });
+}
+function resetBatch(lines = []) {
+  $("batch-result").hidden = true;
+  $("batch-result").replaceChildren();
+  $("songs").value = lines.join("\n");
+  $("songs").hidden = false;
+  $("queue").hidden = false;
+  $("clear").hidden = false;
+  $("queue").disabled = false;
+  $("login").disabled = false;
   $("status").textContent = "";
+  batchActive = false;
+}
+async function addQueue() {
+  if (batchActive) return;
+  const lines = [...new Set($("songs").value.split("\n").map(s => s.trim()).filter(Boolean))];
+  if (!lines.length) { log("Paste your song list first."); return; }
+  batchActive = true;
+  $("queue").disabled = true;
+  $("login").disabled = true;
+  $("songs").hidden = true;
+  $("queue").hidden = true;
+  $("clear").hidden = true;
+  $("status").textContent = "";
+  const rows = lines.map(line => ({line, state:"pending"}));
   const seen = new Set();
-  let added = 0;
-
   try {
-    const devices = await api("me/player/devices");
-    if (!devices.devices?.some(d => d.is_active)) {
-      throw new Error(
-        "Open Spotify and start playing a song first."
-      );
-    }
-
-    for (const line of lines) {
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      $("status").textContent = "Analyzing " + (i+1) + " of " + rows.length + "…\n" + r.line;
       try {
-        const track = await findTrack(line);
-        if (!track) {
-          log("No confident match: " + line);
-          continue;
-        }
-
-        if (seen.has(track.uri)) continue;
-
-        await api(
-          "me/player/queue?uri=" +
-          encodeURIComponent(track.uri),
-          "POST"
-        );
-
-        seen.add(track.uri);
-        added++;
-
-        log("✓ " + track.name + " — " +
-          (track.artists.length ? track.artists.map(a => a.name).join(", ") : "direct link"));
-
-        await new Promise(r => setTimeout(r, 350));
-
-      } catch (error) {
-        log("Failed: " + line + " (" + error.message + ")");
+        const match = await findTrack(r.line);
+        if (match?.choices) { r.choices = match.choices; r.state = "review"; }
+        else if (match) { r.track = match; r.state = "ready"; }
+        else r.state = "not found";
+      } catch (e) { r.state = "failed"; r.error = e.message; }
+    }
+    const review = rows.filter(r => r.state === "review");
+    $("status").textContent = review.length ? "Analysis complete. Review " + review.length + " uncertain matches." : "Analysis complete.";
+    for (let i = 0; i < review.length; i++) {
+      const r = review[i];
+      r.track = await chooseTrack(r.line, r.choices, "Match " + (i+1) + " of " + review.length);
+      r.state = r.track ? "ready" : "skipped";
+    }
+    for (const r of rows.filter(r => r.state === "ready")) {
+      if (seen.has(r.track.uri)) r.state = "duplicate";
+      else seen.add(r.track.uri);
+    }
+    const ready = rows.filter(r => r.state === "ready");
+    if (ready.length && review.length && !(await confirmBatch(ready))) {
+      for (const r of ready) r.state = "skipped";
+    } else if (ready.length) {
+      $("status").textContent = "Checking Spotify playback…";
+      const devices = await api("me/player/devices");
+      if (!devices.devices?.some(d => d.is_active)) throw new Error("Open Spotify and start playing a song first.");
+      for (let i = 0; i < ready.length; i++) {
+        const r = ready[i];
+        $("status").textContent = "Adding " + (i+1) + " of " + ready.length + "…";
+        try {
+          await api("me/player/queue?uri=" + encodeURIComponent(r.track.uri), "POST");
+          r.state = "added";
+        } catch (e) { r.state = "failed"; r.error = e.message; }
+        await new Promise(resolve => setTimeout(resolve, 350));
       }
     }
-    log("\n" + added + " songs added to your queue.");
-  } catch (error) {
-    log(error.message);
-  } finally {
-    $("queue").disabled = false;
+  } catch (e) {
+    for (const r of rows) if (["pending","ready","review"].includes(r.state)) { r.state = "failed"; r.error = e.message; }
   }
+  $("status").textContent = "";
+  const count = state => rows.filter(r => r.state === state).length;
+  const added = count("added");
+  const panel = showPanel(added === rows.length ? "Queue complete!" : "Batch finished", added + " added · " + count("skipped") + " skipped · " + count("not found") + " not found · " + count("failed") + " failed · " + count("duplicate") + " duplicates omitted", rows.map(r => r.state + ": " + (r.track ? trackLabel(r.track) : r.line) + (r.error ? " (" + r.error + ")" : "")));
+  const retry = rows.filter(r => ["failed","not found"].includes(r.state)).map(r => r.line);
+  if (retry.length) panelButton(panel, "Review unsuccessful songs", () => resetBatch(retry), true);
+  panelButton(panel, "Start a new batch", () => resetBatch());
 }
 
 $("login").onclick = () => authorize().catch(e => log(e.message));
