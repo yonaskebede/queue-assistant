@@ -65,6 +65,16 @@ button:disabled { opacity: .4; }
 #project-history details { padding: 12px 0; border-bottom: 1px solid #444; }
 #project-history li { overflow-wrap: anywhere; margin: 6px 0; }
 a { color: #1DB954; }
+#project-list .project-row { display: flex; align-items: center; gap: 12px; min-height: 68px; margin: 0; padding: 10px 4px; border-radius: 0; border-bottom: 1px solid #333; background: transparent; color: white; text-align: left; cursor: pointer; font: inherit; }
+#project-list .project-row:hover, #project-list .project-row:active { background: #242424; }
+#project-list .project-row:focus-visible { outline: 2px solid #1DB954; outline-offset: -2px; }
+.project-icon { display: grid; place-items: center; flex: 0 0 44px; height: 44px; border-radius: 8px; font-size: 24px; }
+.playlist-icon { background: #30434D; color: #B5D4E5; }
+.mood-icon { background: #46354D; color: #D8BDE5; }
+.project-info { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.project-info strong { display: block; font-size: 16px; }
+.project-info small { display: block; color: #aaa; font-size: 13px; margin-top: 4px; }
+.project-arrow { flex-shrink: 0; color: #aaa; font-size: 26px; }
 </style>
 </head>
 <body>
@@ -550,11 +560,23 @@ function showHome() {
   const list = $("project-list"); list.replaceChildren();
   if (!projects.length) element("p","No projects yet.",list);
   for (const p of projects) {
-    const card = document.createElement("div"); card.className = "project-card"; list.append(card);
-    element("h3",p.name,card);
-    element("p",p.direction,card);
-    element("p",(p.kind === "playlist" ? "Playlist project" : "Mood project") + " · " + p.sessions.length + " sessions",card);
-    panelButton(card,"Open project",()=>openProject(p.id));
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "project-row";
+    const playlist = p.kind === "playlist";
+    const icon = element("span", playlist ? "♫" : "✧", row);
+    icon.className = "project-icon " + (playlist ? "playlist-icon" : "mood-icon");
+    icon.setAttribute("aria-hidden", "true");
+    const info = document.createElement("span");
+    info.className = "project-info";
+    row.append(info);
+    element("strong", p.name, info);
+    element("small", (playlist ? "Playlist project" : "Mood project") + " · " + p.sessions.length + (p.sessions.length === 1 ? " session" : " sessions"), info);
+    const arrow = element("span", "›", row);
+    arrow.className = "project-arrow";
+    arrow.setAttribute("aria-hidden", "true");
+    row.onclick = () => openProject(p.id);
+    list.append(row);
   }
 }
 function openForm(kind, edit = false) {
